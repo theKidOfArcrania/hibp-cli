@@ -1,0 +1,302 @@
+#!/bin/bash
+# hibp-cli: Simple CLI that queries Have I Been Pwned (HIBP) servers.
+#
+# Copyright (C) 2019 theKidOfArcrania
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+set -euE
+
+# Print an error message on exit
+trap "errexit" err
+errexit () {
+  echo hi
+  default='*** Unknown error occurred ***'
+  if [ ! -v errmsg ]; then
+    errmsg="$default"
+  elif [ -z "$errmsg" ]; then
+    return
+  fi
+  
+  echo "$errmsg"
+  exit 1
+}
+
+opt_dfl() {
+  if [ "$#" -eq 2 ]; then
+    if [[ ! -v options["$1"] ]]; then
+      options[$1]=$2
+    fi
+  elif [ "$#" -eq 1 ]; then
+    if [[ ! -v "options[$1]" ]]; then
+      options[$1]=
+    fi
+  else
+    echo 'Usage: opt_default OPT_NAME [DEFAULT]'
+  fi
+}
+
+# Checks whether if a user password is already exposed
+check_pass() {
+
+  opt_dfl showPass
+  opt_dfl argument
+  opt_dfl doPost
+  opt_dfl passAPI "https://api.pwnedpasswords.com/range/"
+
+
+
+  # Read user's password
+  if [ -z ${options[argument]} ]; then
+    read_opts=(-p "Input password: ")
+    if [ -z ${options["showPass"]} ]; then
+      read_opts+=(-s)
+    fi
+
+    pass=
+    short=
+    while [ -z "$pass" ]; do 
+      read "${read_opts[@]}" pass
+      if [ -z "${options[showPass]}" ]; then
+        echo ""
+      fi
+    done
+  else
+    pass="${options[argument]}"
+    short=yes
+  fi
+
+  # Compute our own hash
+  hash=$(echo -n "$pass" | sha1sum | cut -f 1 -d ' ')
+  pref=${hash:0:5}
+  if [[ -z "$short" ]]; then
+    echo -e "Your password hash is: $hash (sha1)"
+  fi
+
+  # Fetch all the password hashes with a prefix
+  curl_opts=("-s" "${options[passAPI]}")
+  if [ -z ${options[doPost]} ]; then
+    curl_opts[-1]+="${hash:0:5}"
+  else
+    curl_opts+=("--data-raw" "${hash:0:5}")
+  fi
+
+  errmsg='*** Failed to fetch password hashes ***'
+  hashlist=$(curl "${curl_opts[@]}")
+  hashlist=$(echo -n "$hashlist" | tr -d '\r')
+  unset errmsg
+
+  # See if we can find user's password hash in it...
+  found=1
+  used=$(echo "$hashlist" | grep -i "${hash:5}") || found=0
+
+  if [ "$found" -eq "1" ]; then
+    used=$(echo "$used" | head -1 | cut -f 2 -d ':')
+    if [[ -z "$short" ]]; then
+      echo "Oh noes! Your password has been used $used times!"
+    else
+      echo -e "BAD (found $used times)"
+    fi
+  else
+    if [[ -z "$short" ]]; then
+      echo "Good, your password has not been found!"
+      echo "(Though it doesn't mean that your password is a secure one.)"
+    else
+      echo "OK!"
+    fi
+  fi
+}
+
+# Check whether if an email has a breach
+check_email() {
+  opt_dfl argument
+  opt_dfl doPost
+  opt_dfl emailAPI "https://api.haveibeenpwned.com/unifiedsearch/"
+
+  if [ -z ${options[argument]} ]; then
+    email=
+    short=
+    while [ -z "$email" ]; do 
+      read -p 'Input email: ' email
+    done
+  else 
+    email=${options[argument]}
+    short=yes
+  fi
+
+
+  # Fetch breaches/leaks
+  curl_opts=("-s" "${options[emailAPI]}")
+  if [ -z ${options[doPost]} ]; then
+    curl_opts[-1]+="$email"
+  else
+    curl_opts+=("--data-raw" "${email}")
+  fi
+
+  errmsg='*** Failed to fetch status for email ***'
+  status=$(curl "${curl_opts[@]}")
+
+  if [ -z "$status" ]; then
+    if [ -n "$short" ]; then
+      echo "OK:  0 breaches, 0 pastes"
+    else
+      echo "Your account has no breaches or pastes. You are good :)"
+    fi
+  else
+    analyze_email_status "$status"
+    if [ -n "$short" ]; then
+      echo "BAD: $breaches breaches, $pastes pastes"
+    else
+      echo "Uh oh... your account has been breached on $breaches sites" \
+        "and found on $pastes pastes!"
+    fi
+  fi
+
+}
+
+# STATUS IS_SHORT
+# returns breaches, pastes
+analyze_email_status() {
+  PYCODE=$(cat <<EOF
+
+import json, sys
+status = json.loads(sys.stdin.read())
+
+breaches = 0
+if status['Breaches']:
+  breaches = len(status['Breaches'])
+pastes = 0
+if status['Pastes']:
+  pastes = len(status['Pastes'])
+
+print('{} {} '.format(breaches, pastes))
+
+EOF
+)
+
+  ret=$(echo "$status" | python3 <(echo "$PYCODE"))
+  breaches=$(echo "$ret" | cut -d ' ' -f 1)
+  pastes=$(echo "$ret" | cut -d ' ' -f 2)
+}
+
+do_help() {
+  cat <<EOF
+Usage: $0 [OPTIONS...] {-e|-p} [--] VALUES...
+Checks whether if a password or email has been pwned in existing dataleaks or
+breaches. Passwords/emails can either be supplied directly command-line or
+interactively. 
+
+Select action to perform:
+  -e, --check-email      Checks if an email has been compromised in a previous
+                         leak or breach.
+  -p, --check-password   Checks if a password has been previously found in
+                         previous breach.
+
+Optional options for checking password:
+  -S, --show-text       Echo the text when typing in a password.
+      --no-show-text    Do not echo the text when typing in a password.
+                        (Enabled by default.)
+      --pass-api=URL    Set the base URL for downloading hashes of passwords.
+                        This is tacked on with the actual hash prefix (unless -P
+                        flag is set), and sends this request to the resulting
+                        URL. Defaults to "https://api.pwnedpasswords.com/range/".
+
+Optional options for checking emails:
+      --email-api=URL   Set the base URL for checking statuses of emails
+                        (whether or not if they are pwned or not). This is
+                        tacked onto the actual email (unless -P flag is set),
+                        and sends this request with the resulting URL. Defaults
+                        to "https://api.haveibeenpwned.com/unifiedsearch/".
+
+General options:
+  -P, --post    Makes a POST request query instead of the default GET request.
+                In this case, the password/email is placed in the data component
+                of the query.
+  -h, --help    Prints this help message.
+
+Copyright (c) 2018 theKidOfArcrania
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+
+EOF
+  exit 1
+}
+
+main=
+set_main() {
+  if [ -n "$main" ]; then
+    echo 'Multiple -e -p flags detected!'
+  fi
+  main=$1
+}
+
+
+OPTIND=0
+
+declare -A options
+ARGS=()
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case $1 in 
+      -e|--check-email) set_main check_email ;;
+      -p|--check-password) set_main check_pass ;;
+      -h|--help) do_help ;;
+      -S|--show-text) options[showPass]=yes ;;
+      --no-show-text) options[showPass]= ;;
+      -P|--post) options[doPost]=yes ;;
+      -u|--pass-api) 
+        options[passAPI]=$2
+        shift
+        ;;
+      --);;
+      *)
+        ARGS+=("$1")
+        ;;
+    esac
+    shift
+  done
+}
+
+# Read commandline arguments into options array
+LONGOPTS=check-email,check-password,help,show-text,no-show-text,post,pass-api:
+OPTSTR=ephSPu:
+errmsg=
+optstr=$(getopt -o $OPTSTR -l $LONGOPTS -n $0 -- "$@")
+eval "parse_args $optstr"
+
+if [ -z "$main" ]; then
+  do_help
+fi
+
+if [[ ${#ARGS[@]} -gt 0 ]]; then
+  maxlen=0
+  for arg in "${ARGS[@]}"; do
+    len=${#arg}
+    if [[ $len -gt $maxlen ]]; then
+      maxlen="$len"
+    fi
+  done
+
+  for arg in "${ARGS[@]}"; do
+    if [[ -n $arg ]]; then
+      printf "%-${maxlen}s | " "$arg"
+      options[argument]="$arg"
+      eval "$main"
+    fi
+  done
+else
+  eval "$main"
+fi
