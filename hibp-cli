@@ -59,9 +59,9 @@ check_pass() {
 
 
   # Read user's password
-  if [ -z ${options[argument]} ]; then
+  if [ -z "${options[argument]}" ]; then
     read_opts=(-p "Input password: ")
-    if [ -z ${options["showPass"]} ]; then
+    if [ -z "${options[showPass]}" ]; then
       read_opts+=(-s)
     fi
 
@@ -87,7 +87,7 @@ check_pass() {
 
   # Fetch all the password hashes with a prefix
   curl_opts=("-s" "${options[passAPI]}")
-  if [ -z ${options[doPost]} ]; then
+  if [ -z "${options[doPost]}" ]; then
     curl_opts[-1]+="${hash:0:5}"
   else
     curl_opts+=("--data-raw" "${hash:0:5}")
@@ -125,7 +125,7 @@ check_email() {
   opt_dfl doPost
   opt_dfl emailAPI "https://api.haveibeenpwned.com/unifiedsearch/"
 
-  if [ -z ${options[argument]} ]; then
+  if [ -z "${options[argument]}" ]; then
     email=
     short=
     while [ -z "$email" ]; do 
@@ -139,7 +139,7 @@ check_email() {
 
   # Fetch breaches/leaks
   curl_opts=("-s" "${options[emailAPI]}")
-  if [ -z ${options[doPost]} ]; then
+  if [ -z "${options[doPost]}" ]; then
     curl_opts[-1]+="$email"
   else
     curl_opts+=("--data-raw" "${email}")
